@@ -48,16 +48,18 @@ class _CornerStorageBuilder:
 
 def _build_impl(frame_sequence: pims.FramesSequence,
                 builder: _CornerStorageBuilder) -> None:
-    _MAX_CORNERS = 1000
-    _RADIUS = 100
-    st_params = dict(qualityLevel=0.03,
-                     minDistance=15,
-                     blockSize=8)
+    _MAX_CORNERS = 2000
+    _RADIUS = 8
+    st_params = dict(qualityLevel=0.003,
+                     minDistance=8,
+                     blockSize=12)
 
     lk_params = dict(winSize=(10, 10),
                      maxLevel=2,
                      criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT,
-                               10, 0.03))
+                               10, 0.03),
+                     flags=cv2.OPTFLOW_LK_GET_MIN_EIGENVALS,
+                     minEigThreshold=0.0006)
 
     image_0 = frame_sequence[0]
     corners0 = cv2.goodFeaturesToTrack(image_0,
@@ -77,6 +79,7 @@ def _build_impl(frame_sequence: pims.FramesSequence,
         block_sizes
     )
     builder.set_corners_at_frame(0, corners)
+    max_ids = num_corners - 1
 
     for frame, image in enumerate(frame_sequence[1:], 1):
         corners1, status, _ = cv2.calcOpticalFlowPyrLK(np.uint8(image_0 * 255),
@@ -94,12 +97,12 @@ def _build_impl(frame_sequence: pims.FramesSequence,
             corners.sizes[status == 1]
         )
 
-        if _MAX_CORNERS - sum(status) > 300:
+        if _MAX_CORNERS - sum(status) > 100:
             mask = np.full_like(image, 255, dtype='uint8')
-            curr_corners = corners.points.round().astype(np.uint8)
+            curr_corners = corners.points
 
-            for corner, size in zip(curr_corners, corners.sizes):
-                cv2.circle(mask, corner, _RADIUS, 0, -1)
+            for corner in curr_corners:
+                cv2.circle(mask, (int(corner[0]), int(corner[1])), _RADIUS, 0, -1)
 
             new_corners = cv2.goodFeaturesToTrack(image,
                                                   mask=mask,
@@ -108,14 +111,15 @@ def _build_impl(frame_sequence: pims.FramesSequence,
 
             if new_corners is not None:
                 new_corners = new_corners.reshape(-1, 2)
-                max_ids = corners.ids.max()
+
                 corners = FrameCorners(
-                    np.vstack((corners.ids,
-                               np.arange(max_ids,
-                                         max_ids + new_corners.shape[0]).reshape((-1, 1)) + 1)),
+                    np.vstack((corners.ids, np.arange(
+                        max_ids, max_ids + new_corners.shape[0]).reshape((-1, 1)) + 1)),
                     np.vstack((corners.points, new_corners)),
-                    np.vstack((corners.sizes, np.full(new_corners.shape[0], st_params['blockSize']).reshape((-1, 1))))
+                    np.vstack((corners.sizes, np.full(
+                        new_corners.shape[0], st_params['blockSize']).reshape((-1, 1))))
                 )
+                max_ids += new_corners.shape[0]
 
         builder.set_corners_at_frame(frame, corners)
         image_0 = image
