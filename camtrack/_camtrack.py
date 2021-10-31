@@ -17,7 +17,8 @@ __all__ = [
     'to_camera_center',
     'to_opencv_camera_mat3x3',
     'triangulate_correspondences',
-    'view_mat3x4_to_pose'
+    'view_mat3x4_to_pose',
+    'PnpParameters'
 ]
 
 from collections import namedtuple
@@ -126,6 +127,13 @@ Correspondences = namedtuple(
 TriangulationParameters = namedtuple(
     'TriangulationParameters',
     ('max_reprojection_error', 'min_triangulation_angle_deg', 'min_depth')
+)
+
+
+PnpParameters = namedtuple(
+    'PnpParameters',
+    ('max_reprojection_error', 'min_inlier_count', 'min_inlier_ratio',
+     'supposed_outliers_ratio', 'inliers_probability', 'correspondences_num')
 )
 
 
