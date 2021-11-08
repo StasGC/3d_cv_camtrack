@@ -24,7 +24,6 @@ from _camtrack import (
     build_correspondences,
     triangulate_correspondences,
     PnpParameters,
-    check_inliers_mask,
     rodrigues_and_translation_to_view_mat3x4
 )
 
@@ -49,47 +48,51 @@ def _add_new_points(point_cloud: PointCloudBuilder,
 def _view_matrix_from_pnp(point_cloud: PointCloudBuilder,
                           corners: FrameCorners,
                           intrinsic_mat: np.ndarray,
-                          params: PnpParameters) -> Tuple[np.array, float]:
+                          params: PnpParameters) -> np.array:
     _, (ind_1, ind_2) = snp.intersect(point_cloud.ids.flatten(), corners.ids.flatten(), indices=True)
 
     iterationsCount = int(np.ceil(np.log(1.0 - params.inliers_probability) /
                                   np.log(1.0 - (1.0 - params.supposed_outliers_ratio) ** params.correspondences_num)))
+    # retval, rvec, tvec, inliers = cv2.solvePnPRansac(
+    #     point_cloud.points[ind_1],
+    #     corners.points[ind_2],
+    #     intrinsic_mat,
+    #     None,
+    #     iterationsCount=iterationsCount,
+    #     reprojectionError=params.max_reprojection_error,
+    #     flags=cv2.SOLVEPNP_EPNP
+    # )
+    #
+    # tmp_err = params.max_reprojection_error
+    # while not retval:
+    #     tmp_err -= 0.5
+    #     if tmp_err < 0:
+    #         break
+    #     retval, rvec, tvec, inliers = cv2.solvePnPRansac(
+    #         point_cloud.points[ind_1],
+    #         corners.points[ind_2],
+    #         intrinsic_mat,
+    #         None,
+    #         iterationsCount=iterationsCount,
+    #         reprojectionError=tmp_err,
+    #         flags=cv2.SOLVEPNP_EPNP
+    #     )
+
     retval, rvec, tvec, inliers = cv2.solvePnPRansac(
         point_cloud.points[ind_1],
         corners.points[ind_2],
         intrinsic_mat,
-        None,
+        distCoeffs=np.array([]),
+        useExtrinsicGuess=True,
         iterationsCount=iterationsCount,
         reprojectionError=params.max_reprojection_error,
-        flags=cv2.SOLVEPNP_EPNP
+        confidence=params.inliers_probability,
+        flags=cv2.SOLVEPNP_ITERATIVE
     )
 
-    # TODO: реализовать уточнение решения на инлаерах (пока не работает)
-    # if not retval:
-    #     return None, 0
-    # inliers = inliers.flatten()
-    # inliers_mask = np.full_like(ids, False)
-    # inliers_mask[inliers] = True
-    # if not check_inliers_mask(inliers_mask, params.min_inlier_count, params.min_inlier_ratio):
-    #     return None, 0
-    #
-    # retval_2, rvec_2, tvec_2 = cv2.solvePnP(
-    #     point_cloud.points[ind_1[inliers]],
-    #     corners.points[ind_2[inliers]],
-    #     intrinsic_mat,
-    #     None,
-    #     rvec,
-    #     tvec,
-    #     True,
-    #     cv2.SOLVEPNP_ITERATIVE
-    # )
-    # if retval_2:
-    #     return rodrigues_and_translation_to_view_mat3x4(rvec_2, tvec_2), len(inliers)
-    # else:
-    #     return rodrigues_and_translation_to_view_mat3x4(rvec, tvec), len(inliers)
-
-    print(f"On this iterations was found {len(inliers)} inliers")
-    return rodrigues_and_translation_to_view_mat3x4(rvec, tvec), len(inliers)
+    if inliers is not None:
+        print(f"On this iterations was found {len(inliers)} inliers")
+    return rodrigues_and_translation_to_view_mat3x4(rvec, tvec)
 
 
 def track_and_calc_colors(camera_parameters: CameraParameters,
@@ -111,7 +114,8 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
     frame_count = len(corner_storage)
     view_mats = [pose_to_view_mat3x4(known_view_1[1])] * frame_count
 
-    _max_reprojection_error = 1.0
+    _max_reprojection_error = 6.0
+
     triangulate_params = TriangulationParameters(
         max_reprojection_error=_max_reprojection_error,
         min_triangulation_angle_deg=1.0,
@@ -126,7 +130,6 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
         correspondences_num=5
     )
 
-    # TODO: implement
     view_mats[known_view_1[0]] = pose_to_view_mat3x4(known_view_1[1])
     view_mats[known_view_2[0]] = pose_to_view_mat3x4(known_view_2[1])
     correspondences = build_correspondences(
@@ -142,71 +145,99 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
     print(f"{_points.shape[0]} triangulated points from first frames")
     print(f"Point cloud size: {point_cloud_builder.points.shape[0]}")
 
-    known_view_mats = [known_view_1[0], known_view_2[0]]
-    step_size = 10
+    min_ = min(known_view_1[0], known_view_2[0])
+    max_ = min(known_view_1[0], known_view_2[0])
 
-    for i in range(step_size):
+    for i in range(min_ + 1, max_):
         curr_frame = i
-        prev_frame = i
         print(f"Processing the {curr_frame} frame")
-        if curr_frame not in known_view_mats:
-            view_mats[curr_frame], num_inliers = _view_matrix_from_pnp(
+        view_mats[curr_frame] = _view_matrix_from_pnp(
+            point_cloud_builder,
+            corner_storage[i],
+            intrinsic_mat,
+            pnp_params
+        )
+
+    known_view_mats = [known_view_1[0], known_view_2[0]]
+    step_size = np.abs(known_view_1[0] - known_view_2[0])
+
+    prev_frame = min_
+    for i in range(min_ - step_size, -step_size, -step_size):
+        if i < 0:
+            curr_frame = 0
+        else:
+            curr_frame = i
+
+        print(f"Processing the {curr_frame} frame")
+        view_mats[curr_frame] = _view_matrix_from_pnp(
+            point_cloud_builder,
+            corner_storage[curr_frame],
+            intrinsic_mat,
+            pnp_params
+        )
+        known_view_mats.append(curr_frame)
+
+        _add_new_points(
+            point_cloud_builder,
+            corner_storage[curr_frame],
+            corner_storage[prev_frame],
+            view_mats[curr_frame],
+            view_mats[prev_frame],
+            intrinsic_mat,
+            triangulate_params
+        )
+        print(f"Point cloud size: {point_cloud_builder.points.shape[0]}")
+
+        for j in range(curr_frame + 1, prev_frame):
+            print(f"Processing the {j} frame")
+            view_mats[j] = _view_matrix_from_pnp(
                 point_cloud_builder,
-                corner_storage[curr_frame],
+                corner_storage[j],
                 intrinsic_mat,
                 pnp_params
             )
-            known_view_mats.append(curr_frame)
+            known_view_mats.append(j)
 
-        for curr_frame in range(step_size + i, frame_count, step_size):
-            print(f"Processing the {curr_frame} frame")
-            if curr_frame not in known_view_mats:
-                view_mats[curr_frame], num_inliers = _view_matrix_from_pnp(
-                    point_cloud_builder,
-                    corner_storage[curr_frame],
-                    intrinsic_mat,
-                    pnp_params
-                )
-                known_view_mats.append(curr_frame)
+        prev_frame = curr_frame
 
-            _add_new_points(
+    prev_frame = max_
+    for i in range(max_ + step_size, frame_count + step_size, step_size):
+        if i >= frame_count:
+            curr_frame = frame_count - 1
+        else:
+            curr_frame = i
+
+        print(f"Processing the {curr_frame} frame")
+        view_mats[curr_frame] = _view_matrix_from_pnp(
+            point_cloud_builder,
+            corner_storage[curr_frame],
+            intrinsic_mat,
+            pnp_params
+        )
+        known_view_mats.append(curr_frame)
+
+        _add_new_points(
+            point_cloud_builder,
+            corner_storage[curr_frame],
+            corner_storage[prev_frame],
+            view_mats[curr_frame],
+            view_mats[prev_frame],
+            intrinsic_mat,
+            triangulate_params
+        )
+        print(f"Point cloud size: {point_cloud_builder.points.shape[0]}")
+
+        for j in range(prev_frame + 1, curr_frame):
+            print(f"Processing the {j} frame")
+            view_mats[j] = _view_matrix_from_pnp(
                 point_cloud_builder,
-                corner_storage[curr_frame],
-                corner_storage[prev_frame],
-                view_mats[curr_frame],
-                view_mats[prev_frame],
+                corner_storage[j],
                 intrinsic_mat,
-                triangulate_params
+                pnp_params
             )
-            print(f"Point cloud size: {point_cloud_builder.points.shape[0]}")
-            prev_frame = curr_frame
+            known_view_mats.append(j)
 
-    # prev_frame = -1
-    # print(view_mats)
-    # while True:
-    #     if None in view_mats:
-    #         curr_frame = view_mats.index(None)
-    #         view_mats[curr_frame], num_inliers = _view_matrix_from_pnp(
-    #             point_cloud_builder,
-    #             corner_storage[curr_frame],
-    #             intrinsic_mat,
-    #             pnp_params
-    #         )
-    #         known_view_mats.append(curr_frame)
-    #
-    #         if prev_frame != -1:
-    #             _add_new_points(
-    #                 point_cloud_builder,
-    #                 corner_storage[curr_frame],
-    #                 corner_storage[prev_frame],
-    #                 view_mats[curr_frame],
-    #                 view_mats[prev_frame],
-    #                 intrinsic_mat,
-    #                 triangulate_params
-    #             )
-    #         prev_frame = curr_frame
-    #     else:
-    #         break
+        prev_frame = curr_frame
 
     calc_point_cloud_colors(
         point_cloud_builder,
